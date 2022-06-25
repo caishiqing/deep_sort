@@ -1,3 +1,10 @@
+""" 最优估计理论
+
+信息融合：
+假设 x1 ~ N(μ1, σ1^2), x2 ~ N(μ2, σ2^2), 则融合后的分布为:
+x ~ N(σ2^2/σ1^2+σ2^2 * μ1 + σ1^2/σ1^2+σ2^2 * μ2, σ1^2*σ2^2/σ1^2+σ2^2)
+"""
+
 from tensorflow.keras import backend
 import tensorflow as tf
 import numpy as np
@@ -24,7 +31,7 @@ class KalmanFilter(object):
 
         更新: 利用当前时刻的观测修正先验估计得到后验估计
             观测余量:        y(t) = z(t) - H∙x_(t)
-            观测的协方差:    S(t) = H∙P_(t)∙H^T + R(t)
+            方差之和:    S(t) = H∙P_(t)∙H^T + R(t)
             卡尔曼增益:      K(t) = P_(t)∙H^T∙S(t)^-1
                                 = P_(t)∙H^T∙(H∙P_(t)∙H^T + R(t))^-1
             状态后验估计:    x(t) = x_(t) + K(t)∙y(t) 
@@ -39,12 +46,19 @@ class KalmanFilter(object):
                  B: Union[tf.Tensor, np.ndarray] = None,
                  P: Union[tf.Tensor, np.ndarray] = None,
                  Q: Union[tf.Tensor, np.ndarray] = None,
-                 R: Union[tf.Tensor, np.ndarray] = None):
+                 R: Union[tf.Tensor, np.ndarray] = None,
+                 format: str = "left_matmul"):
 
-        # self.F, self.H, self.B 是原公式的转置，代表右乘变换
-        self.x = tf.identity(x)
-        self.F = tf.identity(F)
-        self.H = tf.identity(H)
+        self.x = tf.cast(tf.identity(x), tf.float32)
+        self.F = tf.cast(tf.identity(F), tf.float32)
+        self.H = tf.cast(tf.identity(H), tf.float32)
+
+        if backend.ndim(self.x) == 1:
+            self.x = tf.expand_dims(x, 0)
+        if format == "left_matmul":
+            # self.F, self.H, self.B 是原公式的转置，代表右乘变换
+            self.F = tf.transpose(self.F)
+            self.H = tf.transpose(self.H)
 
         assert self.x.shape[-1] == self.F.shape[-1]
         self.state_dim = self.x.shape[-1]
@@ -62,37 +76,52 @@ class KalmanFilter(object):
         if R is None:
             R = tf.eye(self.measure_dim)
 
-        if tf.keras.backend.ndim(P) == 2:
+        if backend.ndim(P) == 2:
             P = tf.expand_dims(P, 0)
-        if tf.keras.backend.ndim(Q) == 2:
+        if backend.ndim(Q) == 2:
             Q = tf.expand_dims(Q, 0)
-        if tf.keras.backend.ndim(R) == 2:
+        if backend.ndim(R) == 2:
             R = tf.expand_dims(R, 0)
 
-        self.P = tf.identity(P)
-        self.Q = tf.identity(Q)
-        self.R = tf.identity(R)
+        self.P = tf.cast(tf.identity(P), tf.float32)
+        self.Q = tf.cast(tf.identity(Q), tf.float32)
+        self.R = tf.cast(tf.identity(R), tf.float32)
 
         assert self.Q.shape[-1] == self.state_dim
         assert self.R.shape[-1] == self.measure_dim
 
-    def predict(self, u: tf.Tensor = None):
-        x_ = tf.matmul(self.x, self.F)
-        if u is not None:
-            x_ += tf.matmul(u, self.B)
-        # (P∙F^T)^T∙F^T = F∙P^T∙F^T = F∙P∙F^T
-        P_ = tf.matmul(tf.matmul(self.P, self.F), self.F, transpose_a=True) + self.Q
-        return x_, P_
+        self.x_ = None
+        self.P_ = None
 
-    def update(self, z: tf.Tensor, x_: tf.Tensor, P_: tf.Tensor):
-        y = z - tf.matmul(x_, self.H)
+    def predict(self, u: tf.Tensor = None):
+        self.x_ = tf.matmul(self.x, self.F)
+        if u is not None:
+            u = tf.cast(u, tf.float32)
+            self.x_ += tf.matmul(u, self.B)
+        # (P∙F^T)^T∙F^T = F∙P^T∙F^T = F∙P∙F^T
+        self.P_ = tf.matmul(tf.matmul(self.P, self.F), self.F, transpose_a=True) + self.Q
+
+    def update(self, z: tf.Tensor):
+        z = tf.cast(z, self.x.dtype)
+        y = z - tf.matmul(self.x_, self.H)
         # (P_∙H^T)^T∙H^T = H∙P^T∙H^T = H∙P∙H^T
-        S = tf.matmul(tf.matmul(P_, self.H), self.H, transpose_a=True) + self.R
-        K = backend.batch_dot(tf.matmul(P_, self.H), tf.linalg.inv(S))
-        self.x = x_ + backend.batch_dot(K, y)
+        S = tf.matmul(tf.matmul(self.P_, self.H), self.H, transpose_a=True) + self.R
+        K = backend.batch_dot(tf.matmul(self.P_, self.H), tf.linalg.inv(S))
+        self.x = self.x_ + backend.batch_dot(K, y)
         I = tf.expand_dims(tf.eye(self.state_dim), 0)
-        self.P = backend.batch_dot(I-tf.matmul(K, self.H, transpose_b=True), P_)
+        self.P = backend.batch_dot(I - tf.matmul(K, self.H, transpose_b=True), self.P_)
 
     def __call__(self, z: tf.Tensor, u: tf.Tensor = None):
-        x_, P_ = self.predict(u)
-        self.update(z, x_, P_)
+        self.predict(u)
+        self.update(z)
+        return self.x
+
+
+if __name__ == "__main__":
+    kalman = KalmanFilter(x=[0.5, 0.5, 0.5],
+                          F=[[1, 0, 0], [0, 1, 1], [0, 0, 1]],
+                          H=[[0.2, 0.5, 1], [1, 0.9, 0]])
+
+    z = tf.constant([[0.7, 0.3]])
+    x = kalman(z)
+    print(x)
