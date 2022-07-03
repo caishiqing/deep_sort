@@ -117,6 +117,58 @@ class KalmanFilter(object):
         return self.x
 
 
+class ObjectTrackKF(KalmanFilter):
+    _state_dim = 4
+    _std_weight_position = 1. / 20
+    _std_weight_velocity = 1. / 160
+
+    def __init__(self, measurements: Union[tf.Tensor, np.ndarray]):
+        """Create initial kalman filter for object track.
+
+        Args:
+            measurements (Union[tf.Tensor,np.ndarray]): N detected [x, y, a, h]
+        """
+        x = tf.concat([measurements, tf.zeros_like(measurements)], axis=-1)
+        H = np.eye(self._state_dim, 2*self._state_dim)
+        F = np.eye(2*self._state_dim, 2*self._state_dim)
+        for i in range(self._state_dim):
+            F[i, i+self._state_dim] = 1
+
+        p_std = [
+            2 * self._std_weight_position * measurements[:, 0],   # the center point x
+            2 * self._std_weight_position * measurements[:, 1],   # the center point y
+            1 * measurements[:, 2],                               # the ratio of width/height
+            2 * self._std_weight_position * measurements[:, 3],   # the height
+            10 * self._std_weight_velocity * measurements[:, 0],
+            10 * self._std_weight_velocity * measurements[:, 1],
+            0.1 * measurements[:, 2],
+            10 * self._std_weight_velocity * measurements[:, 3]
+        ]
+        P = tf.linalg.diag(tf.transpose(tf.math.square(p_std)))
+
+        q_std = [
+            self._std_weight_position * measurements[:, 0],
+            self._std_weight_position * measurements[:, 1],
+            1 * measurements[:, 2],
+            self._std_weight_position * measurements[:, 3],
+            self._std_weight_velocity * measurements[:, 0],
+            self._std_weight_velocity * measurements[:1],
+            0.1 * measurements[:, 2],
+            self._std_weight_velocity * measurements[:3]
+        ]
+        Q = tf.linalg.diag(tf.transpose(tf.math.square(q_std)))
+
+        r_std = [
+            self._std_weight_position * measurements[:, 3],
+            self._std_weight_position * measurements[:, 3],
+            1e-1,
+            self._std_weight_position * measurements[:, 3]
+        ]
+        R = tf.linalg.diag(tf.transpose(tf.math.square(r_std)))
+
+        super(ObjectTrackKF, self).__init__(x, F, H, P=P, Q=Q, R=R)
+
+
 if __name__ == "__main__":
     kalman = KalmanFilter(x=[0.5, 0.5, 0.5],
                           F=[[1, 0, 0], [0, 1, 1], [0, 0, 1]],
